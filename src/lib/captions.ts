@@ -1,15 +1,14 @@
-import type { Caption } from '../types'
+import type { Caption, CaptionWord } from '../types'
 import { uid } from './utils'
 
 export type CaptionProgress = {
   stage: 'loading-model' | 'extracting-audio' | 'transcribing' | 'done'
-  progress: number // 0–1
+  progress: number
   message: string
 }
 
 type ProgressCb = (p: CaptionProgress) => void
 
-/** Cached Whisper pipeline so the model is only downloaded once per session */
 let transcriberPromise: Promise<any> | null = null
 
 async function getTranscriber(onProgress?: ProgressCb) {
@@ -18,19 +17,16 @@ async function getTranscriber(onProgress?: ProgressCb) {
       onProgress?.({
         stage: 'loading-model',
         progress: 0.05,
-        message: 'Loading speech model (first time may take a minute)…',
+        message: 'Loading speech model (first time ~40–75 MB)…',
       })
 
       const { pipeline, env } = await import('@xenova/transformers')
-
-      // Use local cache in the browser; allow remote model download
       env.allowLocalModels = false
       env.useBrowserCache = true
 
       const pipe = await pipeline(
         'automatic-speech-recognition',
-        // tiny.en is fast & good for English; change to Xenova/whisper-base.en for higher accuracy
-        'Xenova/whisper-tiny.en',
+        'Xenova/whisper-base.en',
         {
           progress_callback: (data: { status?: string; progress?: number }) => {
             if (data.status === 'progress' && typeof data.progress === 'number') {
@@ -56,10 +52,6 @@ async function getTranscriber(onProgress?: ProgressCb) {
   return transcriberPromise
 }
 
-/**
- * Decode the audio track from a video blob URL and return mono Float32 samples at 16 kHz
- * (the rate Whisper expects).
- */
 async function extractAudioSamples(
   videoUrl: string,
   onProgress?: ProgressCb
@@ -72,8 +64,6 @@ async function extractAudioSamples(
 
   const response = await fetch(videoUrl)
   const arrayBuffer = await response.arrayBuffer()
-
-  // Decode at native rate first, then resample to 16 kHz
   const audioCtx = new AudioContext()
   let audioBuffer: AudioBuffer
 
@@ -82,17 +72,15 @@ async function extractAudioSamples(
   } catch {
     await audioCtx.close()
     throw new Error(
-      'Could not decode audio from this video. Try an MP4 or WebM with an audio track.'
+      'Could not decode audio from this video. Try an MP4 or WebM with a clear speech track.'
     )
   }
 
-  // Mix down to mono
   const channelData =
     audioBuffer.numberOfChannels > 1
       ? mixToMono(audioBuffer)
       : audioBuffer.getChannelData(0)
 
-  // Resample to 16 kHz if needed
   const targetRate = 16000
   const samples =
     audioBuffer.sampleRate === targetRate
@@ -116,19 +104,12 @@ function mixToMono(buffer: AudioBuffer): Float32Array {
   const channels = buffer.numberOfChannels
   for (let c = 0; c < channels; c++) {
     const data = buffer.getChannelData(c)
-    for (let i = 0; i < len; i++) {
-      mono[i] += data[i] / channels
-    }
+    for (let i = 0; i < len; i++) mono[i] += data[i] / channels
   }
   return mono
 }
 
-/** Simple linear resampler */
-function resample(
-  input: Float32Array,
-  fromRate: number,
-  toRate: number
-): Float32Array {
+function resample(input: Float32Array, fromRate: number, toRate: number): Float32Array {
   if (fromRate === toRate) return input
   const ratio = fromRate / toRate
   const newLen = Math.round(input.length / ratio)
@@ -143,10 +124,6 @@ function resample(
   return output
 }
 
-/**
- * Transcribe video audio with local Whisper and return timed captions.
- * Everything runs in the browser — no server, no API key.
- */
 export async function generateCaptions(
   videoUrl: string,
   _duration: number,
@@ -158,23 +135,33 @@ export async function generateCaptions(
   onProgress?.({
     stage: 'transcribing',
     progress: 0.7,
-    message: 'Transcribing speech…',
+    message: 'Transcribing speech (word-level)…',
   })
 
-  // Chunk long audio so the UI stays responsive and memory stays reasonable
-  const result = await transcriber(audio, {
-    return_timestamps: true,
-    chunk_length_s: 30,
-    stride_length_s: 5,
-  })
+  let result: any
+  try {
+    result = await transcriber(audio, {
+      return_timestamps: 'word',
+      chunk_length_s: 30,
+      stride_length_s: 5,
+    })
+  } catch {
+    result = await transcriber(audio, {
+      return_timestamps: true,
+      chunk_length_s: 30,
+      stride_length_s: 5,
+    })
+  }
 
   onProgress?.({
     stage: 'transcribing',
-    progress: 0.95,
-    message: 'Building captions…',
+    progress: 0.92,
+    message: 'Building caption lines…',
   })
 
-  const captions = mapResultToCaptions(result)
+  const words = extractWords(result)
+  const captions =
+    words.length > 0 ? groupWordsIntoCaptions(words) : mapSegmentCaptions(result)
 
   onProgress?.({
     stage: 'done',
@@ -191,50 +178,124 @@ export async function generateCaptions(
   return captions
 }
 
-function mapResultToCaptions(result: any): Caption[] {
-  const captions: Caption[] = []
-
+function extractWords(result: any): CaptionWord[] {
   const chunks: any[] = result?.chunks
+  if (!Array.isArray(chunks)) return []
 
-  if (Array.isArray(chunks) && chunks.length > 0) {
-    for (const chunk of chunks) {
-      const text = String(chunk.text ?? '').trim()
-      if (!text) continue
+  const words: CaptionWord[] = []
+  for (const chunk of chunks) {
+    const text = String(chunk.text ?? '').trim()
+    if (!text) continue
+    const ts = chunk.timestamp
+    if (!Array.isArray(ts) || ts.length < 2) continue
+    const start = typeof ts[0] === 'number' && isFinite(ts[0]) ? ts[0] : 0
+    let end = typeof ts[1] === 'number' && isFinite(ts[1]) ? ts[1] : start + 0.3
+    if (end <= start) end = start + 0.25
 
-      let start = 0
-      let end = 0
+    const parts = text.split(/\s+/).filter(Boolean)
+    if (parts.length === 1) {
+      words.push({ text: cleanWord(parts[0]), start, end })
+    } else {
+      const dur = (end - start) / parts.length
+      parts.forEach((p, i) => {
+        words.push({
+          text: cleanWord(p),
+          start: start + i * dur,
+          end: start + (i + 1) * dur,
+        })
+      })
+    }
+  }
+  return words.filter((w) => w.text.length > 0)
+}
+
+function groupWordsIntoCaptions(words: CaptionWord[]): Caption[] {
+  const MAX_WORDS = 7
+  const MAX_CHARS = 42
+  const MAX_DURATION = 3.8
+  const PAUSE_BREAK = 0.55
+
+  const captions: Caption[] = []
+  let buf: CaptionWord[] = []
+
+  const flush = () => {
+    if (!buf.length) return
+    const start = buf[0].start
+    const end = buf[buf.length - 1].end
+    const text = buf.map((w) => w.text).join(' ')
+    captions.push({
+      id: uid(),
+      start: Math.round(start * 100) / 100,
+      end: Math.round(Math.max(end, start + 0.4) * 100) / 100,
+      text,
+      words: buf.map((w) => ({ ...w })),
+    })
+    buf = []
+  }
+
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]
+    const prev = buf[buf.length - 1]
+
+    const gap = prev ? w.start - prev.end : 0
+    const wouldChars =
+      buf.reduce((n, x) => n + x.text.length, 0) + buf.length + w.text.length
+    const wouldDur = prev ? w.end - buf[0].start : 0
+
+    const shouldBreak =
+      buf.length > 0 &&
+      (gap >= PAUSE_BREAK ||
+        buf.length >= MAX_WORDS ||
+        wouldChars > MAX_CHARS ||
+        wouldDur > MAX_DURATION ||
+        /[.!?]$/.test(prev?.text ?? ''))
+
+    if (shouldBreak) flush()
+    buf.push(w)
+  }
+  flush()
+
+  return captions
+}
+
+function mapSegmentCaptions(result: any): Caption[] {
+  const chunks: any[] = result?.chunks
+  if (!Array.isArray(chunks)) {
+    if (typeof result?.text === 'string' && result.text.trim()) {
+      return [
+        {
+          id: uid(),
+          start: 0,
+          end: 4,
+          text: cleanTranscript(result.text),
+        },
+      ]
+    }
+    return []
+  }
+
+  return chunks
+    .map((chunk) => {
+      const text = cleanTranscript(String(chunk.text ?? ''))
+      if (!text) return null
       const ts = chunk.timestamp
-
-      if (Array.isArray(ts) && ts.length >= 2) {
-        start = typeof ts[0] === 'number' && isFinite(ts[0]) ? ts[0] : 0
-        end =
-          typeof ts[1] === 'number' && isFinite(ts[1])
-            ? ts[1]
-            : start + Math.max(1.5, text.split(/\s+/).length * 0.35)
-      } else {
-        start = captions.length === 0 ? 0 : captions[captions.length - 1].end
-        end = start + Math.max(1.5, text.split(/\s+/).length * 0.35)
-      }
-
-      if (end <= start) end = start + 1.2
-
-      captions.push({
+      const start =
+        Array.isArray(ts) && typeof ts[0] === 'number' ? ts[0] : 0
+      let end =
+        Array.isArray(ts) && typeof ts[1] === 'number' ? ts[1] : start + 2
+      if (end <= start) end = start + 1.5
+      return {
         id: uid(),
         start: Math.round(start * 100) / 100,
         end: Math.round(end * 100) / 100,
-        text: cleanTranscript(text),
-      })
-    }
-  } else if (typeof result?.text === 'string' && result.text.trim()) {
-    captions.push({
-      id: uid(),
-      start: 0,
-      end: 5,
-      text: cleanTranscript(result.text),
+        text,
+      } as Caption
     })
-  }
+    .filter(Boolean) as Caption[]
+}
 
-  return mergeShortCaptions(captions)
+function cleanWord(text: string): string {
+  return text.replace(/^[[(].*?[\])]$/g, '').trim()
 }
 
 function cleanTranscript(text: string): string {
@@ -244,28 +305,57 @@ function cleanTranscript(text: string): string {
     .trim()
 }
 
-/** Merge very short adjacent captions for cleaner reading */
-function mergeShortCaptions(captions: Caption[]): Caption[] {
-  if (captions.length < 2) return captions
-  const merged: Caption[] = []
-  let current = { ...captions[0] }
-
-  for (let i = 1; i < captions.length; i++) {
-    const next = captions[i]
-    const gap = next.start - current.end
-    const currentLen = current.end - current.start
-
-    if (currentLen < 1.2 && gap < 0.4 && (current.text + ' ' + next.text).length < 90) {
-      current = {
-        ...current,
-        end: next.end,
-        text: `${current.text} ${next.text}`.replace(/\s+/g, ' ').trim(),
-      }
-    } else {
-      merged.push(current)
-      current = { ...next }
-    }
+export function splitCaption(caption: Caption): [Caption, Caption] | null {
+  if (caption.words && caption.words.length >= 2) {
+    const mid = Math.floor(caption.words.length / 2)
+    const a = caption.words.slice(0, mid)
+    const b = caption.words.slice(mid)
+    return [
+      {
+        id: uid(),
+        start: a[0].start,
+        end: a[a.length - 1].end,
+        text: a.map((w) => w.text).join(' '),
+        words: a,
+      },
+      {
+        id: uid(),
+        start: b[0].start,
+        end: b[b.length - 1].end,
+        text: b.map((w) => w.text).join(' '),
+        words: b,
+      },
+    ]
   }
-  merged.push(current)
-  return merged
+
+  const parts = caption.text.split(/\s+/)
+  if (parts.length < 2) return null
+  const mid = Math.floor(parts.length / 2)
+  const tMid = caption.start + (caption.end - caption.start) / 2
+  return [
+    {
+      id: uid(),
+      start: caption.start,
+      end: tMid,
+      text: parts.slice(0, mid).join(' '),
+    },
+    {
+      id: uid(),
+      start: tMid,
+      end: caption.end,
+      text: parts.slice(mid).join(' '),
+    },
+  ]
+}
+
+export function mergeCaptions(a: Caption, b: Caption): Caption {
+  const words =
+    a.words && b.words ? [...a.words, ...b.words] : undefined
+  return {
+    id: uid(),
+    start: Math.min(a.start, b.start),
+    end: Math.max(a.end, b.end),
+    text: `${a.text} ${b.text}`.replace(/\s+/g, ' ').trim(),
+    words,
+  }
 }
