@@ -11,9 +11,11 @@ type ProgressCb = (p: CaptionProgress) => void
 
 const TARGET_SR = 16000
 
-/** Prefer small.en for noise robustness; falls back to base if load fails */
 const MODEL_PRIMARY = 'Xenova/whisper-small.en'
 const MODEL_FALLBACK = 'Xenova/whisper-base.en'
+
+const WINDOW_S = 28
+const HOP_S = 24
 
 let transcriberPromise: Promise<any> | null = null
 let loadedModelId = ''
@@ -35,7 +37,7 @@ async function getTranscriber(onProgress?: ProgressCb) {
         if (data.status === 'progress' && typeof data.progress === 'number') {
           onProgress?.({
             stage: 'loading-model',
-            progress: Math.min(0.48, 0.04 + (data.progress / 100) * 0.44),
+            progress: Math.min(0.42, 0.04 + (data.progress / 100) * 0.38),
             message: `Downloading model… ${Math.round(data.progress)}%`,
           })
         }
@@ -75,7 +77,7 @@ async function getTranscriber(onProgress?: ProgressCb) {
 
       onProgress?.({
         stage: 'loading-model',
-        progress: 0.5,
+        progress: 0.45,
         message: `Model ready (${loadedModelId.split('/').pop()})`,
       })
 
@@ -91,14 +93,14 @@ async function extractAudioSamples(
 ): Promise<Float32Array> {
   onProgress?.({
     stage: 'extracting-audio',
-    progress: 0.52,
-    message: 'Extracting & cleaning audio…',
+    progress: 0.48,
+    message: 'Extracting audio…',
   })
 
   const response = await fetch(videoUrl)
   const arrayBuffer = await response.arrayBuffer()
 
-  let audioCtx: AudioContext | OfflineAudioContext
+  let audioCtx: AudioContext
   let audioBuffer: AudioBuffer
 
   try {
@@ -107,7 +109,7 @@ async function extractAudioSamples(
   } catch {
     try {
       audioCtx = new AudioContext()
-      audioBuffer = await (audioCtx as AudioContext).decodeAudioData(arrayBuffer.slice(0))
+      audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0))
     } catch {
       throw new Error(
         'Could not decode audio from this video. Try an MP4 or WebM with a speech track.'
@@ -124,30 +126,27 @@ async function extractAudioSamples(
     samples = resample(samples, audioBuffer.sampleRate, TARGET_SR)
   }
 
-  if ('close' in audioCtx) {
-    try {
-      await (audioCtx as AudioContext).close()
-    } catch {
-      /* ignore */
-    }
+  try {
+    await audioCtx.close()
+  } catch {
+    /* ignore */
   }
 
   onProgress?.({
     stage: 'extracting-audio',
-    progress: 0.58,
-    message: 'Reducing noise & boosting speech…',
+    progress: 0.54,
+    message: 'Cleaning audio (gentle)…',
   })
 
   samples = removeDc(samples)
-  samples = highPassFilter(samples, TARGET_SR, 85)
-  samples = softNoiseGate(samples, TARGET_SR)
-  samples = speechBandEmphasis(samples, TARGET_SR)
-  samples = rmsNormalize(samples, 0.12)
+  samples = highPassFilter(samples, TARGET_SR, 70)
+  samples = gentleNoiseReduce(samples, TARGET_SR)
+  samples = rmsNormalize(samples, 0.1)
 
   onProgress?.({
     stage: 'extracting-audio',
-    progress: 0.64,
-    message: 'Audio ready',
+    progress: 0.58,
+    message: `Audio ready (${(samples.length / TARGET_SR).toFixed(1)}s)`,
   })
 
   return samples
@@ -182,7 +181,7 @@ function resample(input: Float32Array, fromRate: number, toRate: number): Float3
 function removeDc(input: Float32Array): Float32Array {
   let sum = 0
   for (let i = 0; i < input.length; i++) sum += input[i]
-  const mean = sum / input.length
+  const mean = sum / (input.length || 1)
   const out = new Float32Array(input.length)
   for (let i = 0; i < input.length; i++) out[i] = input[i] - mean
   return out
@@ -200,9 +199,9 @@ function highPassFilter(input: Float32Array, sr: number, cutoffHz: number): Floa
   return out
 }
 
-function softNoiseGate(input: Float32Array, sr: number): Float32Array {
-  const win = Math.max(64, Math.floor(sr * 0.02))
-  const hop = Math.max(32, Math.floor(win / 2))
+function gentleNoiseReduce(input: Float32Array, sr: number): Float32Array {
+  const win = Math.max(128, Math.floor(sr * 0.025))
+  const hop = Math.max(64, Math.floor(win / 2))
   const energies: number[] = []
 
   for (let i = 0; i + win <= input.length; i += hop) {
@@ -213,45 +212,22 @@ function softNoiseGate(input: Float32Array, sr: number): Float32Array {
     }
     energies.push(Math.sqrt(e / win))
   }
-  if (!energies.length) return input
+  if (energies.length < 4) return input
 
   const sorted = [...energies].sort((a, b) => a - b)
-  const noiseFloor = sorted[Math.floor(sorted.length * 0.15)] || 0.001
-  const threshold = Math.max(noiseFloor * 2.2, 0.004)
-  const open = threshold * 1.6
+  const noiseFloor = sorted[Math.floor(sorted.length * 0.1)] || 0.001
+  const attenuateBelow = noiseFloor * 1.35
 
   const out = new Float32Array(input.length)
-  let gain = 0.15
-
   for (let i = 0; i < input.length; i++) {
     const frameIdx = Math.min(energies.length - 1, Math.floor(i / hop))
     const e = energies[frameIdx]
-    const target =
-      e >= open ? 1 : e <= threshold ? 0.08 : 0.08 + 0.92 * ((e - threshold) / (open - threshold))
-    gain += (target - gain) * 0.12
-    out[i] = input[i] * gain
-  }
-  return out
-}
-
-function speechBandEmphasis(input: Float32Array, sr: number): Float32Array {
-  const lp = onePoleLowPass(input, sr, 3400)
-  const band = highPassFilter(lp, sr, 280)
-  const out = new Float32Array(input.length)
-  for (let i = 0; i < input.length; i++) {
-    out[i] = input[i] * 0.65 + band[i] * 0.55
-  }
-  return out
-}
-
-function onePoleLowPass(input: Float32Array, sr: number, cutoffHz: number): Float32Array {
-  const rc = 1 / (2 * Math.PI * cutoffHz)
-  const dt = 1 / sr
-  const alpha = dt / (rc + dt)
-  const out = new Float32Array(input.length)
-  out[0] = input[0]
-  for (let i = 1; i < input.length; i++) {
-    out[i] = out[i - 1] + alpha * (input[i] - out[i - 1])
+    if (e < attenuateBelow && e > 0) {
+      const g = Math.max(0.4, e / attenuateBelow)
+      out[i] = input[i] * g
+    } else {
+      out[i] = input[i]
+    }
   }
   return out
 }
@@ -259,10 +235,9 @@ function onePoleLowPass(input: Float32Array, sr: number, cutoffHz: number): Floa
 function rmsNormalize(input: Float32Array, targetRms: number): Float32Array {
   let sum = 0
   for (let i = 0; i < input.length; i++) sum += input[i] * input[i]
-  const rms = Math.sqrt(sum / input.length) || 1e-8
+  const rms = Math.sqrt(sum / (input.length || 1)) || 1e-8
   let gain = targetRms / rms
-  gain = Math.min(gain, 8)
-  gain = Math.max(gain, 0.25)
+  gain = Math.min(Math.max(gain, 0.3), 6)
 
   const out = new Float32Array(input.length)
   let peak = 0
@@ -271,9 +246,138 @@ function rmsNormalize(input: Float32Array, targetRms: number): Float32Array {
     const a = Math.abs(out[i])
     if (a > peak) peak = a
   }
-  if (peak > 0.98) {
-    const scale = 0.98 / peak
+  if (peak > 0.99) {
+    const scale = 0.99 / peak
     for (let i = 0; i < out.length; i++) out[i] *= scale
+  }
+  return out
+}
+
+async function transcribeWindows(
+  transcriber: any,
+  audio: Float32Array,
+  onProgress?: ProgressCb
+): Promise<CaptionWord[]> {
+  const totalSamples = audio.length
+  const duration = totalSamples / TARGET_SR
+  const windowSamples = Math.floor(WINDOW_S * TARGET_SR)
+  const hopSamples = Math.floor(HOP_S * TARGET_SR)
+
+  if (duration <= WINDOW_S + 2) {
+    onProgress?.({
+      stage: 'transcribing',
+      progress: 0.7,
+      message: 'Transcribing…',
+    })
+    return await transcribeOne(transcriber, audio, 0)
+  }
+
+  const allWords: CaptionWord[] = []
+  let offset = 0
+  let windowIndex = 0
+  const totalWindows = Math.ceil((totalSamples - windowSamples) / hopSamples) + 1
+
+  while (offset < totalSamples) {
+    const end = Math.min(offset + windowSamples, totalSamples)
+    const slice = audio.subarray(offset, end)
+
+    if (!isMostlySilent(slice)) {
+      const timeOffset = offset / TARGET_SR
+      const pct = 0.6 + 0.32 * (windowIndex / Math.max(totalWindows, 1))
+      onProgress?.({
+        stage: 'transcribing',
+        progress: pct,
+        message: `Transcribing segment ${windowIndex + 1}/${totalWindows} (${timeOffset.toFixed(0)}s)…`,
+      })
+
+      const words = await transcribeOne(transcriber, slice, timeOffset)
+
+      const isLast = end >= totalSamples
+      const keepStart = timeOffset + (windowIndex === 0 ? 0 : (WINDOW_S - HOP_S) / 2)
+      const keepEnd = isLast
+        ? duration + 1
+        : timeOffset + WINDOW_S - (WINDOW_S - HOP_S) / 2
+
+      for (const w of words) {
+        const mid = (w.start + w.end) / 2
+        if (mid >= keepStart && mid < keepEnd) {
+          allWords.push(w)
+        }
+      }
+    } else {
+      onProgress?.({
+        stage: 'transcribing',
+        progress: 0.6 + 0.32 * (windowIndex / Math.max(totalWindows, 1)),
+        message: `Skipping silent segment ${windowIndex + 1}/${totalWindows}…`,
+      })
+    }
+
+    if (end >= totalSamples) break
+    offset += hopSamples
+    windowIndex++
+  }
+
+  allWords.sort((a, b) => a.start - b.start)
+  return dedupeWords(allWords)
+}
+
+async function transcribeOne(
+  transcriber: any,
+  audio: Float32Array,
+  timeOffset: number
+): Promise<CaptionWord[]> {
+  const copy = new Float32Array(audio.length)
+  copy.set(audio)
+
+  let result: any
+  try {
+    result = await transcriber(copy, {
+      return_timestamps: 'word',
+      chunk_length_s: 30,
+      stride_length_s: 5,
+      temperature: 0,
+    })
+  } catch {
+    try {
+      result = await transcriber(copy, {
+        return_timestamps: true,
+        temperature: 0,
+      })
+    } catch (e) {
+      console.warn('Window transcription failed', e)
+      return []
+    }
+  }
+
+  return extractWords(result, timeOffset)
+}
+
+function isMostlySilent(samples: Float32Array): boolean {
+  if (samples.length < 100) return true
+  let sum = 0
+  const step = 8
+  let n = 0
+  for (let i = 0; i < samples.length; i += step) {
+    sum += samples[i] * samples[i]
+    n++
+  }
+  const rms = Math.sqrt(sum / (n || 1))
+  return rms < 0.008
+}
+
+function dedupeWords(words: CaptionWord[]): CaptionWord[] {
+  if (words.length < 2) return words
+  const out: CaptionWord[] = [words[0]]
+  for (let i = 1; i < words.length; i++) {
+    const prev = out[out.length - 1]
+    const w = words[i]
+    if (
+      Math.abs(w.start - prev.start) < 0.12 &&
+      w.text.toLowerCase() === prev.text.toLowerCase()
+    ) {
+      continue
+    }
+    out.push(w)
   }
   return out
 }
@@ -288,58 +392,32 @@ export async function generateCaptions(
 
   onProgress?.({
     stage: 'transcribing',
-    progress: 0.68,
-    message: 'Transcribing speech (enhanced model)…',
+    progress: 0.6,
+    message: 'Transcribing full timeline…',
   })
 
-  const decodeOpts: Record<string, unknown> = {
-    return_timestamps: 'word',
-    chunk_length_s: 20,
-    stride_length_s: 4,
-    temperature: 0,
-    no_repeat_ngram_size: 3,
-  }
-
-  let result: any
-  try {
-    result = await transcriber(audio, decodeOpts)
-  } catch {
-    onProgress?.({
-      stage: 'transcribing',
-      progress: 0.75,
-      message: 'Retrying transcription…',
-    })
-    result = await transcriber(audio, {
-      return_timestamps: true,
-      chunk_length_s: 25,
-      stride_length_s: 5,
-      temperature: 0,
-    })
-  }
+  const words = await transcribeWindows(transcriber, audio, onProgress)
 
   onProgress?.({
     stage: 'transcribing',
-    progress: 0.92,
+    progress: 0.94,
     message: 'Building caption lines…',
   })
 
-  const words = extractWords(result)
-  let captions =
-    words.length > 0 ? groupWordsIntoCaptions(words) : mapSegmentCaptions(result)
-
+  let captions = words.length > 0 ? groupWordsIntoCaptions(words) : []
   captions = filterHallucinations(captions)
 
   onProgress?.({
     stage: 'done',
     progress: 1,
     message: captions.length
-      ? `Generated ${captions.length} caption${captions.length === 1 ? '' : 's'}`
+      ? `Generated ${captions.length} caption${captions.length === 1 ? '' : 's'} across the timeline`
       : 'No speech detected',
   })
 
   if (captions.length === 0) {
     throw new Error(
-      'No clear speech detected. Try a clip with louder voice, or reduce music/noise under the speech.'
+      'No clear speech detected across the video. Try a louder voice track or less background music.'
     )
   }
 
@@ -362,30 +440,50 @@ function filterHallucinations(captions: Caption[]): Caption[] {
   })
 }
 
-function extractWords(result: any): CaptionWord[] {
+function extractWords(result: any, timeOffset = 0): CaptionWord[] {
   const chunks: any[] = result?.chunks
-  if (!Array.isArray(chunks)) return []
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    if (typeof result?.text === 'string' && result.text.trim()) {
+      const text = cleanTranscript(result.text)
+      const parts = text.split(/\s+/).filter(Boolean)
+      if (!parts.length) return []
+      const dur = Math.max(2, parts.length * 0.35)
+      return parts.map((p, i) => ({
+        text: cleanWord(p),
+        start: timeOffset + (i / parts.length) * dur,
+        end: timeOffset + ((i + 1) / parts.length) * dur,
+      }))
+    }
+    return []
+  }
 
   const words: CaptionWord[] = []
   for (const chunk of chunks) {
     const text = String(chunk.text ?? '').trim()
     if (!text) continue
     const ts = chunk.timestamp
-    if (!Array.isArray(ts) || ts.length < 2) continue
-    const start = typeof ts[0] === 'number' && isFinite(ts[0]) ? ts[0] : 0
-    let end = typeof ts[1] === 'number' && isFinite(ts[1]) ? ts[1] : start + 0.3
+    let start = 0
+    let end = 0.3
+    if (Array.isArray(ts) && ts.length >= 2) {
+      start = typeof ts[0] === 'number' && isFinite(ts[0]) ? ts[0] : 0
+      end = typeof ts[1] === 'number' && isFinite(ts[1]) ? ts[1] : start + 0.3
+    }
     if (end <= start) end = start + 0.25
 
     const parts = text.split(/\s+/).filter(Boolean)
     if (parts.length === 1) {
-      words.push({ text: cleanWord(parts[0]), start, end })
+      words.push({
+        text: cleanWord(parts[0]),
+        start: start + timeOffset,
+        end: end + timeOffset,
+      })
     } else {
       const dur = (end - start) / parts.length
       parts.forEach((p, i) => {
         words.push({
           text: cleanWord(p),
-          start: start + i * dur,
-          end: start + (i + 1) * dur,
+          start: start + timeOffset + i * dur,
+          end: start + timeOffset + (i + 1) * dur,
         })
       })
     }
@@ -438,33 +536,6 @@ function groupWordsIntoCaptions(words: CaptionWord[]): Caption[] {
   }
   flush()
   return captions
-}
-
-function mapSegmentCaptions(result: any): Caption[] {
-  const chunks: any[] = result?.chunks
-  if (!Array.isArray(chunks)) {
-    if (typeof result?.text === 'string' && result.text.trim()) {
-      return [{ id: uid(), start: 0, end: 4, text: cleanTranscript(result.text) }]
-    }
-    return []
-  }
-
-  return chunks
-    .map((chunk) => {
-      const text = cleanTranscript(String(chunk.text ?? ''))
-      if (!text) return null
-      const ts = chunk.timestamp
-      const start = Array.isArray(ts) && typeof ts[0] === 'number' ? ts[0] : 0
-      let end = Array.isArray(ts) && typeof ts[1] === 'number' ? ts[1] : start + 2
-      if (end <= start) end = start + 1.5
-      return {
-        id: uid(),
-        start: Math.round(start * 100) / 100,
-        end: Math.round(end * 100) / 100,
-        text,
-      } as Caption
-    })
-    .filter(Boolean) as Caption[]
 }
 
 function cleanWord(text: string): string {
