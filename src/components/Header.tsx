@@ -1,6 +1,6 @@
-import { Download, Film, RotateCcw, Loader2 } from 'lucide-react'
+import { Download, Film, RotateCcw, Loader2, FileText } from 'lucide-react'
 import { useEditorStore } from '../store/editorStore'
-import { exportVideo } from '../lib/export'
+import { exportVideo, downloadSrt } from '../lib/export'
 
 export function Header() {
   const project = useEditorStore((s) => s.project)
@@ -56,6 +56,18 @@ export function Header() {
               <RotateCcw size={14} />
               <span className="hidden sm:inline">New</span>
             </button>
+
+            {project.captions.length > 0 && (
+              <button
+                onClick={() => downloadSrt(project)}
+                disabled={isExporting}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-[var(--text-secondary)] hover:bg-[var(--surface-2)] hover:text-[var(--text)] transition-smooth disabled:opacity-40"
+                title="Download SRT"
+              >
+                <FileText size={14} />
+                <span className="hidden sm:inline">SRT</span>
+              </button>
+            )}
 
             <button
               onClick={handleExport}
