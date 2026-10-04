@@ -13,7 +13,7 @@ import {
 } from 'lucide-react'
 import { useEditorStore } from '../store/editorStore'
 import { uid } from '../lib/utils'
-import { generateCaptions } from '../lib/captions'
+import { generateCaptions, type CaptionProgress } from '../lib/captions'
 import { FONT_OPTIONS, PRESET_STYLES } from '../types'
 import clsx from 'clsx'
 
@@ -31,29 +31,46 @@ export function CaptionsPanel() {
   const applyPresetStyle = useEditorStore((s) => s.applyPresetStyle)
   const currentTime = useEditorStore((s) => s.currentTime)
   const [error, setError] = useState<string | null>(null)
+  const [status, setStatus] = useState<string | null>(null)
+  const [progress, setProgress] = useState(0)
   const [tab, setTab] = useState<'list' | 'style'>('list')
 
   const style = project.captionStyle
+
+  const handleProgress = (p: CaptionProgress) => {
+    setProgress(p.progress)
+    setStatus(p.message)
+  }
 
   const handleAutoCaptions = async () => {
     if (!project.videoUrl) return
     setIsGenerating(true)
     setError(null)
+    setStatus('Starting…')
+    setProgress(0)
     try {
-      const captions = await generateCaptions(project.videoUrl, project.duration)
+      const captions = await generateCaptions(
+        project.videoUrl,
+        project.duration,
+        handleProgress
+      )
       setCaptions(captions)
       setTab('list')
+      setStatus(`Done — ${captions.length} captions`)
     } catch (e) {
       console.error(e)
-      setError('Demo captions applied. Real STT can be wired later.')
-      const demo = [
-        { id: uid(), start: 0, end: 2.5, text: 'Welcome to Lumen' },
-        { id: uid(), start: 2.5, end: 5, text: 'Edit text and style freely' },
-        { id: uid(), start: 5, end: Math.min(8, project.duration), text: 'Export burns captions in' },
-      ].filter((c) => c.end <= project.duration)
-      setCaptions(demo)
+      const msg =
+        e instanceof Error
+          ? e.message
+          : 'Transcription failed. Ensure the video has a clear audio track.'
+      setError(msg)
+      setStatus(null)
     } finally {
       setIsGenerating(false)
+      setTimeout(() => {
+        setProgress(0)
+        setStatus(null)
+      }, 2500)
     }
   }
 
@@ -106,12 +123,12 @@ export function CaptionsPanel() {
             <button
               onClick={handleAutoCaptions}
               disabled={isGenerating || !project.videoUrl}
-              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] disabled:opacity-50 transition-smooth shadow-lg shadow-blue-500/10"
+              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] disabled:opacity-50 transition-smooth shadow-lg shadow-blue-500/10 relative overflow-hidden"
             >
               {isGenerating ? (
                 <>
                   <Loader2 size={16} className="animate-spin" />
-                  Generating…
+                  Transcribing…
                 </>
               ) : (
                 <>
@@ -119,24 +136,48 @@ export function CaptionsPanel() {
                   Auto Captions
                 </>
               )}
+              {isGenerating && (
+                <div
+                  className="absolute bottom-0 left-0 h-0.5 bg-white/50 transition-all duration-300"
+                  style={{ width: `${progress * 100}%` }}
+                />
+              )}
             </button>
+
+            {isGenerating && status && (
+              <p className="text-[11px] text-[var(--text-secondary)] text-center leading-snug px-1">
+                {status}
+              </p>
+            )}
+
             <button
               onClick={addManual}
-              className="w-full flex items-center justify-center gap-2 py-2 rounded-xl text-sm text-[var(--text-secondary)] hover:bg-[var(--surface-2)] hover:text-[var(--text)] transition-smooth"
+              disabled={isGenerating}
+              className="w-full flex items-center justify-center gap-2 py-2 rounded-xl text-sm text-[var(--text-secondary)] hover:bg-[var(--surface-2)] hover:text-[var(--text)] transition-smooth disabled:opacity-40"
             >
               <Plus size={16} />
               Add caption
             </button>
+
             {error && (
-              <p className="text-[11px] text-amber-400/90 leading-snug">{error}</p>
+              <p className="text-[11px] text-red-400/90 leading-snug bg-red-500/10 rounded-lg px-2.5 py-2">
+                {error}
+              </p>
+            )}
+
+            {!isGenerating && !error && project.captions.length === 0 && (
+              <p className="text-[10px] text-[var(--text-secondary)] text-center leading-relaxed px-1">
+                Uses on-device Whisper — audio never leaves your browser.
+                First run downloads a small model (~40 MB).
+              </p>
             )}
           </div>
 
           <div className="flex-1 overflow-y-auto px-3 pb-3 space-y-1.5">
-            {project.captions.length === 0 && (
-              <p className="text-xs text-[var(--text-secondary)] text-center py-10 leading-relaxed">
+            {project.captions.length === 0 && !isGenerating && (
+              <p className="text-xs text-[var(--text-secondary)] text-center py-8 leading-relaxed">
                 No captions yet.<br />
-                Generate or add manually.
+                Generate from speech or add manually.
               </p>
             )}
             {project.captions
