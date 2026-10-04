@@ -2,12 +2,12 @@
 
 **Minimal, privacy-first web video editor** — CapCut simplicity meets Apple design.
 
-Upload a video → auto-generate captions → style them → **export a finished video with captions burned in**. Everything runs in the browser. Your footage never leaves the device.
+Upload a video → **auto-generate captions from the actual speech** → style them → export a finished video with captions burned in. Everything runs in the browser. Your footage never leaves the device.
 
 ## Features
 
 - **Upload** — drag & drop or click (MP4, WebM, MOV)
-- **Auto Captions** — one-click generation (demo mode + easy Whisper hook)
+- **Real auto captions** — on-device Whisper (`whisper-tiny.en`) transcribes the video’s audio track with timestamps
 - **Caption styles** — fonts, size, weight, colors, background, position, alignment, shadow, presets
 - **Live preview** — captions render with full styling while you scrub/play
 - **Timeline** — scrub, zoom, caption blocks, click-to-select
@@ -26,31 +26,34 @@ npm run dev
 
 Open http://localhost:5173
 
+## Auto captions
+
+Click **Auto Captions**. Lumen will:
+
+1. Download the Whisper model once (~40 MB, cached in the browser)
+2. Extract audio from your video
+3. Transcribe speech with timestamps
+4. Place editable captions on the timeline
+
+Requires a video with a clear audio / speech track. English is optimized (`whisper-tiny.en`). For other languages, switch the model in `src/lib/captions.ts` to `Xenova/whisper-tiny` or `Xenova/whisper-base`.
+
+First run is slower while the model downloads; later runs reuse the cache.
+
 ## Export
 
-Click **Export**. Lumen plays the video on a hidden canvas, draws each caption with your chosen style, and records the result with `MediaRecorder`. The finished file downloads automatically (usually WebM/VP9).
-
-Best results in Chrome or Edge. Audio is included when the browser allows it.
+Click **Export**. Lumen plays the video on a canvas, draws each caption with your style, and records the result. Best in Chrome or Edge.
 
 ## Caption styling
 
-Open the **Style** tab in the right panel:
+Open the **Style** tab:
 
 - Presets: Classic, Clean, Bold, Minimal, Top Bar
-- Font family, size, weight
-- Text + background color + opacity
-- Position (top / center / bottom)
-- Alignment
-- Text shadow toggle
-- Max width
-
-Changes appear instantly on the preview.
+- Font, size, weight, colors, opacity
+- Position, alignment, shadow, max width
 
 ## Deploy
 
-### Vercel
-
-Import the GitHub repo → Deploy. Zero config.
+Import the repo on [Vercel](https://vercel.com) — zero config.
 
 ```bash
 npx vercel
@@ -58,16 +61,10 @@ npx vercel
 
 ## Tech
 
-- React 19 + TypeScript
-- Vite 8
-- Tailwind CSS 4
-- Zustand
+- React 19 + TypeScript + Vite 8
+- Tailwind CSS 4 + Zustand
+- `@xenova/transformers` (Whisper in-browser)
 - Canvas + MediaRecorder for export
-- Lucide icons
-
-## Adding real speech-to-text
-
-See comments in `src/lib/captions.ts`. Swap the demo generator for `@xenova/transformers` (Whisper) or a cloud STT API.
 
 ## License
 
