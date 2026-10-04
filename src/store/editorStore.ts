@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import type { Caption, Project, TextOverlay, Tool } from '../types'
+import type { Caption, CaptionStyle, Project, TextOverlay, Tool } from '../types'
+import { DEFAULT_CAPTION_STYLE } from '../types'
 
 interface EditorState {
   project: Project
@@ -8,9 +9,10 @@ interface EditorState {
   selectedTool: Tool
   selectedCaptionId: string | null
   isGeneratingCaptions: boolean
-  zoom: number // timeline zoom
+  isExporting: boolean
+  exportProgress: number
+  zoom: number
 
-  // actions
   setVideo: (url: string, fileName: string, duration: number, width: number, height: number) => void
   setCurrentTime: (t: number) => void
   setIsPlaying: (p: boolean) => void
@@ -21,10 +23,14 @@ interface EditorState {
   removeCaption: (id: string) => void
   setSelectedCaptionId: (id: string | null) => void
   setIsGeneratingCaptions: (v: boolean) => void
+  setCaptionStyle: (style: Partial<CaptionStyle>) => void
+  applyPresetStyle: (style: Partial<CaptionStyle>) => void
   addTextOverlay: (t: TextOverlay) => void
   updateTextOverlay: (id: string, patch: Partial<TextOverlay>) => void
   removeTextOverlay: (id: string) => void
   setZoom: (z: number) => void
+  setIsExporting: (v: boolean) => void
+  setExportProgress: (p: number) => void
   reset: () => void
 }
 
@@ -38,6 +44,7 @@ const defaultProject: Project = {
   videoUrl: null,
   videoFileName: null,
   captions: [],
+  captionStyle: { ...DEFAULT_CAPTION_STYLE },
   textOverlays: [],
   clips: [],
 }
@@ -49,6 +56,8 @@ export const useEditorStore = create<EditorState>((set) => ({
   selectedTool: 'select',
   selectedCaptionId: null,
   isGeneratingCaptions: false,
+  isExporting: false,
+  exportProgress: 0,
   zoom: 1,
 
   setVideo: (url, fileName, duration, width, height) =>
@@ -61,9 +70,11 @@ export const useEditorStore = create<EditorState>((set) => ({
         width,
         height,
         name: fileName.replace(/\.[^/.]+$/, '') || 'Untitled',
+        captionStyle: { ...DEFAULT_CAPTION_STYLE },
       },
       currentTime: 0,
       isPlaying: false,
+      selectedCaptionId: null,
     }),
 
   setCurrentTime: (t) => set({ currentTime: Math.max(0, t) }),
@@ -88,6 +99,20 @@ export const useEditorStore = create<EditorState>((set) => ({
     })),
   setSelectedCaptionId: (id) => set({ selectedCaptionId: id }),
   setIsGeneratingCaptions: (v) => set({ isGeneratingCaptions: v }),
+  setCaptionStyle: (style) =>
+    set((s) => ({
+      project: {
+        ...s.project,
+        captionStyle: { ...s.project.captionStyle, ...style },
+      },
+    })),
+  applyPresetStyle: (style) =>
+    set((s) => ({
+      project: {
+        ...s.project,
+        captionStyle: { ...s.project.captionStyle, ...style },
+      },
+    })),
   addTextOverlay: (t) =>
     set((s) => ({
       project: { ...s.project, textOverlays: [...s.project.textOverlays, t] },
@@ -109,11 +134,15 @@ export const useEditorStore = create<EditorState>((set) => ({
       },
     })),
   setZoom: (z) => set({ zoom: Math.max(0.25, Math.min(4, z)) }),
+  setIsExporting: (v) => set({ isExporting: v }),
+  setExportProgress: (p) => set({ exportProgress: p }),
   reset: () =>
     set({
       project: defaultProject,
       currentTime: 0,
       isPlaying: false,
       selectedCaptionId: null,
+      isExporting: false,
+      exportProgress: 0,
     }),
 }))
