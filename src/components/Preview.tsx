@@ -2,6 +2,61 @@ import { useEffect, useRef } from 'react'
 import { Play, Pause, SkipBack, SkipForward } from 'lucide-react'
 import { useEditorStore } from '../store/editorStore'
 import { formatTime } from '../lib/utils'
+import type { CaptionStyle } from '../types'
+
+function CaptionOverlay({
+  text,
+  style,
+}: {
+  text: string
+  style: CaptionStyle
+}) {
+  const bg =
+    style.backgroundOpacity > 0.01
+      ? hexToRgba(style.backgroundColor, style.backgroundOpacity)
+      : 'transparent'
+
+  const positionClass =
+    style.position === 'top'
+      ? 'top-6'
+      : style.position === 'center'
+        ? 'top-1/2 -translate-y-1/2'
+        : 'bottom-8'
+
+  return (
+    <div
+      className={`absolute inset-x-0 flex pointer-events-none px-4 ${positionClass}`}
+      style={{ justifyContent: style.textAlign === 'left' ? 'flex-start' : style.textAlign === 'right' ? 'flex-end' : 'center' }}
+    >
+      <div
+        style={{
+          fontFamily: style.fontFamily,
+          fontSize: `clamp(14px, ${style.fontSize * 0.45}px, ${style.fontSize}px)`,
+          fontWeight: style.fontWeight,
+          color: style.color,
+          background: bg,
+          padding: `${style.paddingY * 0.5}px ${style.paddingX * 0.6}px`,
+          borderRadius: style.borderRadius,
+          maxWidth: `${style.maxWidth}%`,
+          textAlign: style.textAlign,
+          textShadow: style.textShadow ? '0 1px 3px rgba(0,0,0,0.8)' : 'none',
+          lineHeight: 1.3,
+        }}
+      >
+        {text}
+      </div>
+    </div>
+  )
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const h = hex.replace('#', '')
+  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h
+  const r = parseInt(full.slice(0, 2), 16)
+  const g = parseInt(full.slice(2, 4), 16)
+  const b = parseInt(full.slice(4, 6), 16)
+  return `rgba(${r},${g},${b},${alpha})`
+}
 
 export function Preview() {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -11,11 +66,9 @@ export function Preview() {
   const setCurrentTime = useEditorStore((s) => s.setCurrentTime)
   const setIsPlaying = useEditorStore((s) => s.setIsPlaying)
 
-  // Sync video element with store
   useEffect(() => {
     const video = videoRef.current
     if (!video || !project.videoUrl) return
-
     if (Math.abs(video.currentTime - currentTime) > 0.15) {
       video.currentTime = currentTime
     }
@@ -31,18 +84,13 @@ export function Preview() {
     }
   }, [isPlaying, setIsPlaying])
 
-  // Time update from video
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
-
     const onTimeUpdate = () => {
-      if (!video.paused) {
-        setCurrentTime(video.currentTime)
-      }
+      if (!video.paused) setCurrentTime(video.currentTime)
     }
     const onEnded = () => setIsPlaying(false)
-
     video.addEventListener('timeupdate', onTimeUpdate)
     video.addEventListener('ended', onEnded)
     return () => {
@@ -54,12 +102,8 @@ export function Preview() {
   const activeCaptions = project.captions.filter(
     (c) => currentTime >= c.start && currentTime <= c.end
   )
-  const activeTexts = project.textOverlays.filter(
-    (t) => currentTime >= t.start && currentTime <= t.end
-  )
 
   const togglePlay = () => setIsPlaying(!isPlaying)
-
   const seek = (delta: number) => {
     const next = Math.max(0, Math.min(project.duration, currentTime + delta))
     setCurrentTime(next)
@@ -67,76 +111,45 @@ export function Preview() {
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-black/40">
-      {/* Preview area */}
-      <div className="flex-1 relative flex items-center justify-center p-6 overflow-hidden">
-        <div className="relative max-w-full max-h-full shadow-2xl rounded-lg overflow-hidden bg-black">
+    <div className="flex-1 flex flex-col min-h-0 bg-[#0a0a0b]">
+      <div className="flex-1 relative flex items-center justify-center p-4 md:p-6 overflow-hidden">
+        <div className="relative max-w-full max-h-full shadow-2xl rounded-xl overflow-hidden bg-black ring-1 ring-white/5">
           {project.videoUrl && (
             <video
               ref={videoRef}
               src={project.videoUrl}
-              className="preview-video max-h-[50vh] w-auto"
+              className="preview-video max-h-[48vh] w-auto block"
               playsInline
-              muted={false}
             />
           )}
-
-          {/* Caption overlay */}
-          <div className="absolute inset-x-0 bottom-8 flex justify-center pointer-events-none px-4">
-            {activeCaptions.map((c) => (
-              <div
-                key={c.id}
-                className="px-3 py-1.5 rounded-md bg-black/75 text-white text-center text-sm md:text-base font-medium max-w-[90%] leading-snug"
-              >
-                {c.text}
-              </div>
-            ))}
-          </div>
-
-          {/* Text overlays */}
-          {activeTexts.map((t) => (
-            <div
-              key={t.id}
-              className="absolute pointer-events-none"
-              style={{
-                left: `${t.x}%`,
-                top: `${t.y}%`,
-                transform: 'translate(-50%, -50%)',
-                fontSize: t.fontSize,
-                color: t.color,
-                fontWeight: t.fontWeight,
-                background: t.background || 'transparent',
-                padding: t.background ? '4px 8px' : 0,
-                borderRadius: 4,
-              }}
-            >
-              {t.text}
-            </div>
+          {activeCaptions.map((c) => (
+            <CaptionOverlay key={c.id} text={c.text} style={project.captionStyle} />
           ))}
         </div>
       </div>
 
-      {/* Transport controls */}
-      <div className="h-12 flex items-center justify-center gap-4 border-t border-[var(--border)] bg-[var(--surface)] shrink-0">
+      <div className="h-14 flex items-center justify-center gap-3 border-t border-[var(--border)] bg-[var(--surface)] shrink-0">
         <button
           onClick={() => seek(-5)}
-          className="p-2 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--surface-2)] hover:text-[var(--text)] transition-smooth"
+          className="p-2.5 rounded-xl text-[var(--text-secondary)] hover:bg-[var(--surface-2)] hover:text-[var(--text)] transition-smooth"
+          title="Back 5s"
         >
           <SkipBack size={18} />
         </button>
         <button
           onClick={togglePlay}
-          className="w-10 h-10 rounded-full bg-[var(--accent)] text-white flex items-center justify-center hover:bg-[var(--accent-hover)] transition-smooth"
+          className="w-11 h-11 rounded-full bg-[var(--accent)] text-white flex items-center justify-center hover:bg-[var(--accent-hover)] shadow-lg shadow-blue-500/20 transition-smooth"
         >
           {isPlaying ? <Pause size={18} /> : <Play size={18} className="ml-0.5" />}
         </button>
         <button
           onClick={() => seek(5)}
-          className="p-2 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--surface-2)] hover:text-[var(--text)] transition-smooth"
+          className="p-2.5 rounded-xl text-[var(--text-secondary)] hover:bg-[var(--surface-2)] hover:text-[var(--text)] transition-smooth"
+          title="Forward 5s"
         >
           <SkipForward size={18} />
         </button>
-        <span className="text-xs font-mono text-[var(--text-secondary)] min-w-[100px] text-center">
+        <span className="text-xs font-mono text-[var(--text-secondary)] min-w-[110px] text-center tabular-nums">
           {formatTime(currentTime)} / {formatTime(project.duration)}
         </span>
       </div>
